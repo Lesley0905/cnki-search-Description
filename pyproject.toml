@@ -1,4 +1,4 @@
-[project]
+﻿[project]
 name = "cnki-search"
 version = "1.0.0"
 description = "CNKI (中国知网) literature search with browser automation"
@@ -15,8 +15,8 @@ cnki-search = "cnki_search:main"
 cnki-search-gui = "cnki_search:main_gui"
 
 [project.urls]
-Homepage = "https://github.com/YOUR_USERNAME/cnki-search"
-Issues = "https://github.com/YOUR_USERNAME/cnki-search/issues"
+Homepage = "https://github.com/Lesley0905/cnki-search"
+Issues = "https://github.com/Lesley0905/cnki-search/issues"
 
 [build-system]
 requires = ["setuptools>=68"]
