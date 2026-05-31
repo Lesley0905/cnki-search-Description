@@ -1,4 +1,4 @@
-# CNKI Search — 知网文献检索
+﻿# CNKI Search — 知网文献检索
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
@@ -22,7 +22,7 @@ Opens a browser for **manual CAPTCHA solving**, then **automatically** searches,
 
 ```bash
 pip install selenium webdriver-manager
-git clone https://github.com/YOUR_USERNAME/cnki-search.git
+git clone https://github.com/Lesley0905/cnki-search.git
 cd cnki-search
 ```
 
