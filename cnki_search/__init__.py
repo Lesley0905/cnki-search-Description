@@ -567,6 +567,155 @@ def save_results(papers, output_path: Optional[str] = None,
 
 
 # ============================================================
+# Keyword Extraction from Project
+# ============================================================
+
+# Chinese stopwords — words that don't carry topic meaning
+_CN_STOP = set("的 了 在 是 我 有 和 就 不 人 都 一 一个 上 也 很 到 说 要 去 你 会 着 没有 看 好 自己 这 他 她 它 们 那 些 什么 而 为 所以 因为 但是 可以 这个 如果 虽然 然后 之后 之前 已经 比较 非常 还是 或者 以及 不仅 而且 之 其 与 及 等 该 被 把 从 对 向 往 当 于 中 以 后 前 内 外 间 所 呢 吗 吧 啊 呀 哦 嗯".split())
+
+# Known domain-specific keywords to prioritize (expandable)
+_DOMAIN_BOOST = set(
+    "深度学习 机器学习 神经网络 卷积 目标检测 图像识别 图像分类 语义分割 "
+    "YOLO CNN R-CNN SSD Transformer ResNet MobileNet EfficientNet "
+    "病害 病虫害 作物 农作物 玉米 小麦 水稻 大豆 棉花 番茄 苹果 柑橘 "
+    "轻量化 注意力机制 特征融合 多尺度 迁移学习 数据增强 "
+    "检测系统 软件设计 边缘计算 嵌入式 无人机 "
+    "综述 研究进展 现状 综述研究".split()
+)
+
+
+def _text_from_dir(project_path: str) -> str:
+    """Extract readable text from a project directory."""
+    root = Path(project_path)
+    if not root.exists():
+        return ""
+
+    texts = []
+    # Priority files to scan
+    for pattern in ["README*", "*.md", "*.txt", "abstract*.txt", "主题*.txt", "介绍*.txt"]:
+        for f in root.glob(pattern):
+            if f.suffix in (".png", ".jpg", ".pdf"):
+                continue
+            try:
+                content = f.read_text(encoding="utf-8", errors="ignore")
+                texts.append(content)
+            except Exception:
+                pass
+            if len(texts) >= 3:
+                break
+        if texts:
+            break
+
+    # Also check one level down
+    if not texts:
+        for sub in root.iterdir():
+            if sub.is_dir() and not sub.name.startswith("."):
+                for pattern in ["README*", "*.md", "*.txt"]:
+                    for f in sub.glob(pattern):
+                        try:
+                            texts.append(f.read_text(encoding="utf-8", errors="ignore"))
+                        except Exception:
+                            pass
+                        break
+                if texts:
+                    break
+
+    return "\n".join(texts)
+
+
+def extract_keywords(text: str, topk: int = 15) -> list[str]:
+    """Extract key phrases from project text for CNKI search."""
+    if not text:
+        return []
+
+    # Extract Chinese word bigrams and trigrams
+    chinese_chars = re.findall(r'[\u4e00-\u9fff]+', text)
+    phrases = {}
+
+    for segment in chinese_chars:
+        for n in [2, 3, 4]:
+            for i in range(len(segment) - n + 1):
+                phrase = segment[i:i + n]
+                # Skip stopwords
+                if phrase in _CN_STOP:
+                    continue
+                # Boost domain-specific phrases
+                weight = 1.0
+                if phrase in _DOMAIN_BOOST or any(term in phrase for term in _DOMAIN_BOOST):
+                    weight = 2.0
+                phrases[phrase] = phrases.get(phrase, 0) + weight
+
+    # Also extract English acronyms and terms
+    eng_terms = re.findall(r'\b[A-Z][A-Za-z0-9+]{2,}(?:\s?\d+)?\b', text)
+    for term in set(eng_terms):
+        if len(term) >= 3:
+            phrases[term] = phrases.get(term, 0) + 3.0  # English terms get boost
+
+    # Split into Chinese and English, sort by score*length
+    cn_sorted = sorted(
+        [(p, s) for p, s in phrases.items() if re.search(r'[\u4e00-\u9fff]', p)],
+        key=lambda x: -(x[1] * len(x[0]))
+    )
+    en_sorted = sorted(
+        [(p, s) for p, s in phrases.items() if not re.search(r'[\u4e00-\u9fff]', p)],
+        key=lambda x: -(x[1] * len(x[0]))
+    )
+    all_sorted = cn_sorted + en_sorted
+
+    result = []
+    seen = set()
+    for phrase, _ in all_sorted:
+        if len(phrase) < 2:
+            continue
+        if re.match(r'^[0-9\s\.\-\+\*\/\=\{\}\(\)\[\]\<\>\|\&\#\@\!\?\:\;\,\"\']+$', phrase):
+            continue
+        if phrase in seen:
+            continue
+        if any(phrase in existing for existing in seen):
+            continue
+        seen.add(phrase)
+        result.append(phrase)
+        if len(result) >= topk:
+            break
+
+    return result
+
+
+def generate_queries(keywords, num_queries=5):
+    """Generate search queries from extracted keywords (Chinese-first)."""
+    if not keywords:
+        return []
+
+    cn = [k for k in keywords if any('\u4e00' <= c <= '\u9fff' for c in k)]
+    kw = cn + [k for k in keywords if k not in cn]
+    if not kw:
+        return []
+    n = len(kw)
+
+    qs = []
+    if n >= 3:
+        qs.append({"keywords": " ".join(kw[:3])})
+    if n >= 1:
+        qs.append({"keywords": "%s 检测 识别" % kw[0]})
+    if n >= 1:
+        qs.append({"keywords": "%s 综述 研究进展" % kw[0]})
+    if n >= 2:
+        suffix = "深度学习" if "深度" not in kw[0]+kw[1] else "目标检测"
+        qs.append({"keywords": "%s %s %s" % (kw[0], kw[1], suffix)})
+    if n >= 2:
+        qs.append({"keywords": "%s 轻量化 注意力机制" % kw[0]})
+
+    seen = set()
+    uniq = []
+    for q in qs:
+        k = q["keywords"]
+        if k not in seen:
+            seen.add(k)
+            uniq.append(q)
+    return uniq[:num_queries]
+
+
+# ============================================================
 # CLI
 # ============================================================
 
@@ -588,6 +737,8 @@ Examples:
   python -m cnki_search --batch examples/queries.json
   python -m cnki_search "深度学习 图像识别" --output-format json,csv
   python -m cnki_search "机器学习" --article-type dissertation
+  python -m cnki_search --from-project .                    自动从项目提取关键词
+  python -m cnki_search --from-project ~/my-paper/README.md
 
 Output formats: md (Markdown), json, csv, bib (BibTeX)
 Default year range: last 5 years (adjustable with --years)
@@ -608,6 +759,8 @@ Default year range: last 5 years (adjustable with --years)
     parser.add_argument("--output", "-o", help="Output file path (without extension)")
     parser.add_argument("--output-format", "-f", default="md",
                         help="Output formats: md, json, csv (comma-separated)")
+    parser.add_argument("--from-project", "-P", metavar="PATH",
+                        help="Auto-extract keywords from project dir/file")
     parser.add_argument("--keep-open", action="store_true",
                         help="Keep browser open after search")
     parser.add_argument("--no-headless-check", action="store_true",
@@ -617,16 +770,40 @@ Default year range: last 5 years (adjustable with --years)
 
     # --- Build queries ---
     queries = []
+
+    if args.from_project:
+        project_path = Path(args.from_project).expanduser()
+        if not project_path.exists():
+            print(f"❌ 路径不存在: {args.from_project}")
+            sys.exit(1)
+        if project_path.is_file():
+            text = project_path.read_text(encoding="utf-8", errors="ignore")
+        else:
+            text = _text_from_dir(str(project_path))
+        if not text:
+            print(f"⚠️  未在 {args.from_project} 中找到可读文本")
+            sys.exit(1)
+        keywords = extract_keywords(text)
+        if not keywords:
+            print("⚠️  未能提取关键词，请手动指定搜索词")
+            sys.exit(1)
+        print(f"🔑 提取关键词: {', '.join(keywords[:10])}")
+        queries = generate_queries(keywords)
+        print(f"📋 生成 {len(queries)} 组检索式:")
+        for q in queries:
+            print(f"   - {q['keywords']}")
+
     if args.batch:
         with open(args.batch, "r", encoding="utf-8") as f:
             data = json.load(f)
         queries = data if isinstance(data, list) else data.get("queries", [data])
-    else:
+    elif not queries:
         keyword = args.query or ""
         if not keyword:
             print("❌ 请提供搜索关键词")
             print("   python -m cnki_search \"关键词\" [--years 2020-2025]")
             print("   python -m cnki_search --batch queries.json")
+            print("   python -m cnki_search --from-project .")
             sys.exit(1)
         queries = [{"keywords": keyword}]
 
