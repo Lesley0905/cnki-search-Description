@@ -1,9 +1,8 @@
 {
   "queries": [
-    {"keywords": "玉米病害 目标检测 YOLO 深度学习"},
-    {"keywords": "农作物病害 图像识别 轻量化 注意力机制"},
-    {"keywords": "深度学习 农业病害 综述 进展"},
-    {"keywords": "改进YOLO 植物病害 检测"},
-    {"keywords": "农作物病害 检测系统 软件设计"}
+    {"keywords": "玉米病害 目标检测 YOLO", "article_type": "journal"},
+    {"keywords": "农作物病害 深度学习 综述", "article_type": "journal"},
+    {"keywords": "玉米病害 识别", "article_type": "dissertation"},
+    {"keywords": "农业病虫害 检测系统", "article_type": "all"}
   ]
 }

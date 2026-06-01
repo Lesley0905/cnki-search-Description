@@ -373,7 +373,8 @@ def search_cnki(
             print(f"\n{'='*60}")
             print(f"📚 [{idx+1}/{len(queries)}] {keywords}")
 
-            navigate_and_search(driver, keywords, date_from, date_to, core_only, article_type)
+            q_type = q.get("article_type", article_type)  # per-query override
+            navigate_and_search(driver, keywords, date_from, date_to, core_only, q_type)
 
             for page in range(max_pages):
                 try:
