@@ -22,8 +22,8 @@ Opens a browser for **manual CAPTCHA solving**, then **automatically** searches,
 
 ```bash
 pip install selenium webdriver-manager
-git clone https://github.com/Lesley0905/cnki-search.git
-cd cnki-search
+git clone https://github.com/Lesley0905/cnki-search-Description.git
+cd cnki-search-Description
 ```
 
 ### 2. Search
