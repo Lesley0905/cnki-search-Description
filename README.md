@@ -9,10 +9,12 @@ Opens a browser for **manual CAPTCHA solving**, then **automatically** searches,
 ✅ GB/T 7714 citation format  
 ✅ BibTeX export  
 ✅ JSON / CSV export  
+✅ **Abstract extraction** from detail pages (Chinese + English)  
 ✅ Multi-query batch mode  
 ✅ Core journal filter (北大核心 / CSSCI / CSCD)  
 ✅ Default 5-year window (configurable)  
-✅ Works with **OpenClaw** (as a Skill) and **Claude Code** (as a standalone tool)
+✅ `--verbose` to see detailed progress (omit for agent calls)
+✅ Works with **any agent** with shell access
 
 ---
 
@@ -48,6 +50,15 @@ When the browser opens to CNKI:
 1. Complete the slider CAPTCHA manually in the browser
 2. Switch back to terminal → press **Enter**
 3. Everything after that is **fully automatic**
+   （加 `--verbose` 查看详细进度；Agent 调用建议不加）
+
+---
+
+## Demo
+
+搜索"温度检测系统"，2页 41 篇文献，摘要提取成功率 97.6%。
+
+![Demo](docs/demo.png)
 
 ---
 

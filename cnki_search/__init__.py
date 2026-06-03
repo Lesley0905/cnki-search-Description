@@ -14,6 +14,7 @@ Usage:
 import argparse
 import json
 import os
+import random
 import re
 import sys
 import time
@@ -36,6 +37,10 @@ except ImportError:
     print("请先安装依赖: pip install selenium webdriver-manager")
     sys.exit(1)
 
+# Fix console encoding for emoji on Windows
+if sys.platform == 'win32':
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 # ============================================================
 # Configuration
@@ -58,6 +63,14 @@ if env_file.exists():
 CNKI_BROWSER = os.environ.get("CNKI_BROWSER", "edge")
 CNKI_MAX_PAGES = int(os.environ.get("CNKI_MAX_PAGES", "5"))
 CNKI_SEARCH_URL = "https://kns.cnki.net/kns8s/search"
+
+_VERBOSE = False
+
+
+def vprint(*args, **kwargs):
+    """Print progress to stderr when verbose mode is on; silent otherwise."""
+    if _VERBOSE:
+        print(*args, file=sys.stderr, **kwargs)
 
 
 # ============================================================
@@ -82,13 +95,47 @@ def create_driver() :
         return webdriver.Edge(service=service, options=options)
 
 
+_SIGNAL_MODE = False
+_SIGNAL_DIR = None
+
 def wait_for_user(instructions: str = "请在浏览器中手动完成验证码/登录"):
-    """Pause and wait for manual user action."""
-    print(f"\n{'='*60}")
-    print(f"⚠️  {instructions}")
-    print(f"   完成后按 Enter 继续...")
-    print(f"{'='*60}")
-    input()
+    """Pause and wait for manual user action.
+
+    In normal mode: uses input() to wait for Enter.
+    In signal mode (--signal-file): creates .cnki_waiting marker and
+    polls for .cnki_continue signal file. Works with any agent.
+    """
+    vprint(f"\n{'='*60}")
+    vprint(f"⚠️  {instructions}")
+
+    if _SIGNAL_MODE:
+        signal_dir = Path(_SIGNAL_DIR) if _SIGNAL_DIR else PROJECT_DIR
+        waiting_file = signal_dir / ".cnki_waiting"
+        continue_file = signal_dir / ".cnki_continue"
+
+        # Clean stale files
+        waiting_file.unlink(missing_ok=True)
+        continue_file.unlink(missing_ok=True)
+
+        waiting_file.write_text(
+            f"等待用户操作: {instructions}\n"
+            f"时间: {datetime.now().isoformat()}\n"
+            f"请创建 {continue_file} 以继续"
+        )
+        vprint(f"   📡 信号模式 — 等待 {continue_file.name}")
+        vprint(f"   Agent 请在用户操作完成后创建此文件")
+        vprint(f"{'='*60}")
+
+        while not continue_file.exists():
+            time.sleep(2)
+
+        waiting_file.unlink(missing_ok=True)
+        continue_file.unlink(missing_ok=True)
+        vprint("   ✅ 收到继续信号")
+    else:
+        vprint(f"   完成后按 Enter 继续...")
+        vprint(f"{'='*60}")
+        input()
 
 
 # ============================================================
@@ -222,6 +269,14 @@ def extract_all_from_page(driver) :
             text = row.text.strip()
             paper = parse_cnki_result_row(text)
             if paper:
+                # Capture detail page URL from the title link
+                try:
+                    link = row.find_element(By.CSS_SELECTOR,
+                        "a.fz14, a[href*='detail'], a[href*='abstract'], "
+                        "a[href*='Article'], a[href*='kcms2'], td.name a")
+                    paper['detail_url'] = link.get_attribute('href')
+                except NoSuchElementException:
+                    paper['detail_url'] = ''
                 papers.append(paper)
         except Exception:
             continue
@@ -278,7 +333,7 @@ def apply_date_filter(driver, date_from: str = "", date_to: str = ""):
     """Attempt to click date range filter on CNKI page."""
     if not date_from and not date_to:
         return
-    print(f"   📅 设置年份: {date_from or '不限'}-{date_to or '不限'}")
+    vprint(f"   📅 设置年份: {date_from or '不限'}-{date_to or '不限'}")
     try:
         from_input = driver.find_element(By.CSS_SELECTOR, "input[id*='datefrom'], input[name*='from']")
         if from_input and date_from:
@@ -297,7 +352,7 @@ def apply_date_filter(driver, date_from: str = "", date_to: str = ""):
 
 def apply_core_filter(driver) -> bool:
     """Click '核心期刊' filter and wait for reload."""
-    print("   🔍 筛选核心期刊...")
+    vprint("   🔍 筛选核心期刊...")
     selectors = [
         "//span[contains(text(),'核心期刊')]",
         "//label[contains(text(),'核心期刊')]",
@@ -309,14 +364,65 @@ def apply_core_filter(driver) -> bool:
             elem = driver.find_element(By.XPATH, sel)
             elem.click()
             time.sleep(3)
-            print("   ✅ 已筛选核心期刊")
+            vprint("   ✅ 已筛选核心期刊")
             return True
         except NoSuchElementException:
             continue
 
-    print("   ⚠️ 未找到核心期刊筛选按钮，请手动点击")
+    vprint("   ⚠️ 未找到核心期刊筛选按钮，请手动点击")
     wait_for_user("请手动点击'核心期刊'筛选，然后按 Enter")
     return True
+
+
+def extract_abstract_from_detail(driver, paper) -> str:
+    """
+    Visit a paper's detail page and extract its abstract.
+
+    Tries Chinese abstract first (id=ChDivSummary), then English abstract.
+    Returns combined abstract string, or empty string on any failure.
+    Does not raise — failures are logged via print and produce ''.
+    """
+    url = paper.get('detail_url', '')
+    if not url or not url.startswith('http'):
+        return ''
+
+    try:
+        driver.get(url)
+        time.sleep(2)
+
+        cn = ''
+        for sel in ['#ChDivSummary', '.abstract-text', '.abstract', '#abstract',
+                     'div.row-abstract', '[class*="summary"]', '[class*="abstract"]']:
+            try:
+                elem = driver.find_element(By.CSS_SELECTOR, sel)
+                text = elem.text.strip()
+                if text and len(text) > 20:
+                    cn = text
+                    break
+            except NoSuchElementException:
+                continue
+
+        en = ''
+        for sel in ['#EnDivSummary', '.en-abstract', '#en-abstract',
+                     '[class*="abstract"][class*="en"]']:
+            try:
+                elem = driver.find_element(By.CSS_SELECTOR, sel)
+                text = elem.text.strip()
+                if text and len(text) > 10:
+                    en = text
+                    break
+            except NoSuchElementException:
+                continue
+
+        parts = []
+        if cn:
+            parts.append(cn)
+        if en:
+            parts.append(f"[Abstract] {en}")
+        return '\n'.join(parts) if parts else ''
+
+    except Exception:
+        return ''
 
 
 def navigate_and_search(
@@ -329,7 +435,7 @@ def navigate_and_search(
 ):
     """Navigate to CNKI and execute a search."""
     url = build_search_url(keywords, date_from, date_to, article_type)
-    print(f"\n🔍 检索: {keywords}")
+    vprint(f"\n🔍 检索: {keywords}")
     
     driver.get(url)
     time.sleep(3)
@@ -347,6 +453,48 @@ def navigate_and_search(
 
     if core_only:
         apply_core_filter(driver)
+
+
+def deduplicate_papers(papers: list) -> list:
+    """Deduplicate papers: DOI as primary key, title+first_author as fallback.
+
+    Only used in batch mode (multiple queries) to remove cross-query duplicates.
+    Prints a one-line summary: 去重完成：原始 N 篇 → 去重后 M 篇（移除 K 条重复）
+    """
+    if not papers:
+        return papers
+
+    original_count = len(papers)
+    seen_doi = set()
+    seen_ta = set()
+    deduped = []
+
+    for p in papers:
+        doi = (p.get('doi') or '').strip()
+        if doi:
+            if doi in seen_doi:
+                continue
+            seen_doi.add(doi)
+            deduped.append(p)
+            continue
+
+        title = (p.get('title') or '').strip()
+        authors = (p.get('authors') or '').strip()
+        first_author = (authors.split(';')[0].split('；')[0].strip()
+                        if authors else '')
+        ta_key = f"{title}||{first_author}"
+
+        if ta_key in seen_ta:
+            continue
+        seen_ta.add(ta_key)
+        deduped.append(p)
+
+    removed = original_count - len(deduped)
+    if removed > 0:
+        vprint(f"去重完成：原始 {original_count} 篇 → 去重后 {len(deduped)} 篇"
+              f"（移除 {removed} 条重复）")
+
+    return deduped
 
 
 def search_cnki(
@@ -370,15 +518,15 @@ def search_cnki(
             date_from = q.get("date_from", "")
             date_to = q.get("date_to", "")
             
-            print(f"\n{'='*60}")
-            print(f"📚 [{idx+1}/{len(queries)}] {keywords}")
+            vprint(f"\n{'='*60}")
+            vprint(f"[查询 {idx+1}/{len(queries)}] 关键词：\"{keywords}\"")
 
             q_type = q.get("article_type", article_type)  # per-query override
             navigate_and_search(driver, keywords, date_from, date_to, core_only, q_type)
 
             for page in range(max_pages):
                 try:
-                    print(f"   📄 第 {page+1} 页...", end=" ")
+                    vprint(f"[{page+1}/{max_pages} 页] 正在获取...", end=" ")
                     papers = extract_all_from_page(driver)
 
                     new_count = 0
@@ -390,18 +538,41 @@ def search_cnki(
                             all_papers.append(p)
                             new_count += 1
 
-                    print(f"{len(papers)} 条, 新增 {new_count}（累计 {len(all_papers)}）")
+                    vprint(f"{len(papers)} 条, 新增 {new_count}（累计 {len(all_papers)}）")
 
                     if not go_next_page(driver):
                         break
                 except Exception as e:
-                    print(f"翻页跳过: {e}")
+                    vprint(f"翻页跳过: {e}")
                     break
                 time.sleep(2)
 
+        # --- Extract abstracts from detail pages ---
+        if all_papers:
+            vprint(f"\n{'='*60}")
+            vprint(f"📝 正在提取摘要... ({len(all_papers)} 篇)")
+            abstract_count = 0
+            for i, paper in enumerate(all_papers):
+                delay = 1.5 + random.random() * 1.5  # 1.5–3.0 s
+                time.sleep(delay)
+                paper['abstract'] = extract_abstract_from_detail(driver, paper)
+                if paper.get('abstract'):
+                    abstract_count += 1
+                ok = paper.get('abstract')
+                vprint(f"摘要提取中 [{i+1}/{len(all_papers)}] "
+                      f"{'✅' if ok else '❌'}《{paper.get('title', '?')}》")
+            vprint(f"📝 摘要提取完成: {abstract_count}/{len(all_papers)} 篇成功")
+        else:
+            for p in all_papers:
+                p['abstract'] = ''
+
+        # --- Batch deduplication (multi-query only) ---
+        if len(queries) > 1:
+            all_papers = deduplicate_papers(all_papers)
+
     finally:
         if close_driver:
-            print("\n🔒 浏览器将在 5 秒后关闭...")
+            vprint("\n🔒 浏览器将在 5 秒后关闭...")
             time.sleep(5)
             driver.quit()
 
@@ -413,7 +584,7 @@ def search_cnki(
 # ============================================================
 
 def format_gbt7714(paper: dict) -> str:
-    """GB/T 7714-2015 journal article format."""
+    """GB/T 7714-2015 journal article format (with optional abstract)."""
     authors = paper.get("authors", "")
     title = paper.get("title", "")
     journal = paper.get("journal", "")
@@ -441,11 +612,14 @@ def format_gbt7714(paper: dict) -> str:
         if pages:
             date_part += f": {pages}"
         parts.append(f"{date_part}.")
-    return " ".join(parts)
+    citation = " ".join(parts)
+    if paper.get("abstract"):
+        citation += f"\n摘要: {paper['abstract']}"
+    return citation
 
 
 def format_bibtex(paper: dict) -> str:
-    """BibTeX entry for the paper."""
+    """BibTeX entry for the paper (with optional abstract)."""
     authors = paper.get("authors", "Unknown")
     first_author = authors.split(";")[0].split(" ")[0].strip() if authors else "Unknown"
     title_key = re.sub(r'[^a-zA-Z0-9]', '', paper.get("title", "")[:20] or "paper")
@@ -465,6 +639,8 @@ def format_bibtex(paper: dict) -> str:
         lines.append(f'  pages = {{{{{paper.get("pages") or paper.get("page_count")}}}}},')
     if paper.get("doi"):
         lines.append(f'  doi = {{{{{paper.get("doi")}}}}},')
+    if paper.get("abstract"):
+        lines.append(f'  abstract = {{{{{paper["abstract"]}}}}},')
     lines.append("}")
     return "\n".join(lines)
 
@@ -493,6 +669,8 @@ def export_markdown(papers, output_path: Path) -> Path:
                 f.write(f"- **DOI**: {p.get('doi')}\n")
             if p.get("is_core"):
                 f.write(f"- **⭐ Core Journal**\n")
+            if p.get("abstract"):
+                f.write(f"- **Abstract**: {p.get('abstract')}\n")
             f.write(f"\n**GB/T 7714**:\n> {format_gbt7714(p)}\n\n")
             f.write(f"**BibTeX**:\n```bibtex\n{format_bibtex(p)}\n```\n\n---\n\n")
     return output_path
@@ -510,6 +688,7 @@ def export_json(papers, output_path: Path) -> Path:
             "volume": p.get("volume"),
             "issue": p.get("issue"),
             "pages": p.get("pages") or p.get("page_count"),
+            "abstract": p.get("abstract", ""),
             "doi": p.get("doi"),
             "is_core": p.get("is_core", False),
             "citation_gbt7714": format_gbt7714(p),
@@ -527,7 +706,7 @@ def export_csv(papers, output_path: Path) -> Path:
     with open(output_path, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["序号", "标题", "作者", "期刊", "年份", "卷", "期", "页码",
-                         "DOI", "核心期刊", "GB/T 7714引用"])
+                         "摘要", "DOI", "核心期刊", "GB/T 7714引用"])
         for i, p in enumerate(papers, 1):
             writer.writerow([
                 i,
@@ -538,6 +717,7 @@ def export_csv(papers, output_path: Path) -> Path:
                 p.get("volume", ""),
                 p.get("issue", ""),
                 p.get("pages") or p.get("page_count", ""),
+                p.get("abstract", ""),
                 p.get("doi", ""),
                 "是" if p.get("is_core") else "",
                 format_gbt7714(p),
@@ -764,10 +944,25 @@ Default year range: last 5 years (adjustable with --years)
                         help="Auto-extract keywords from project dir/file")
     parser.add_argument("--keep-open", action="store_true",
                         help="Keep browser open after search")
+    parser.add_argument("--verbose", "-v", action="store_true",
+                        help="Show progress output (agent mode: omit for silence)")
+    parser.add_argument("--signal-file", "-S", action="store_true",
+                        help="Use file-based signaling instead of stdin (agent automation)")
     parser.add_argument("--no-headless-check", action="store_true",
                         help="Skip checking for headless mode")
 
     args = parser.parse_args()
+
+    # Enable verbose progress output
+    if args.verbose:
+        global _VERBOSE
+        _VERBOSE = True
+
+    # Enable signal mode for agent automation
+    if args.signal_file:
+        global _SIGNAL_MODE, _SIGNAL_DIR
+        _SIGNAL_MODE = True
+        _SIGNAL_DIR = str(OUTPUT_DIR)
 
     # --- Build queries ---
     queries = []
@@ -788,11 +983,11 @@ Default year range: last 5 years (adjustable with --years)
         if not keywords:
             print("⚠️  未能提取关键词，请手动指定搜索词")
             sys.exit(1)
-        print(f"🔑 提取关键词: {', '.join(keywords[:10])}")
+        vprint(f"🔑 提取关键词: {', '.join(keywords[:10])}")
         queries = generate_queries(keywords)
-        print(f"📋 生成 {len(queries)} 组检索式:")
+        vprint(f"📋 生成 {len(queries)} 组检索式:")
         for q in queries:
-            print(f"   - {q['keywords']}")
+            vprint(f"   - {q['keywords']}")
 
     if args.batch:
         with open(args.batch, "r", encoding="utf-8") as f:
@@ -820,12 +1015,12 @@ Default year range: last 5 years (adjustable with --years)
     formats = tuple(f.strip() for f in args.output_format.split(","))
 
     # --- Run ---
-    print("🚀 CNKI Search")
-    print(f"   检索组数: {len(queries)}")
-    print(f"   时间范围: {date_from} — {date_to}")
-    print(f"   核心期刊: {'是' if args.core_only else '所有'}")
-    print(f"   文献类型: {args.article_type}")
-    print(f"   每查询最多翻页: {args.max_pages}")
+    vprint("🚀 CNKI Search")
+    vprint(f"   检索组数: {len(queries)}")
+    vprint(f"   时间范围: {date_from} — {date_to}")
+    vprint(f"   核心期刊: {'是' if args.core_only else '所有'}")
+    vprint(f"   文献类型: {args.article_type}")
+    vprint(f"   每查询最多翻页: {args.max_pages}")
 
     driver = create_driver()
     try:
