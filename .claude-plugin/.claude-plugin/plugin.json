@@ -1,0 +1,10 @@
+{
+  "name": "cnki-search",
+  "description": "知网文献检索工具，浏览器自动化 + 半自动过验证码，支持摘要提取、批量去重、多格式导出（GB/T 7714 / BibTeX / JSON / CSV / Markdown）、核心期刊筛选、Agent 免终端调用",
+  "author": {
+    "name": "Lesley0905"
+  },
+  "homepage": "https://github.com/Lesley0905/cnki-search-Description",
+  "version": "0.1.0",
+  "category": "research"
+}
